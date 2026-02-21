@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	"github.com/multiformats/go-multiaddr"
 	"resilient/internal/store"
 	"resilient/internal/cas"
 )
@@ -95,6 +96,7 @@ func New(port int, host host.Host, startTime time.Time, store *store.Store, casS
 	// Basic endpoints
 	mux.HandleFunc("/api/info", s.handleInfo)
 	mux.HandleFunc("/api/peers", s.handlePeers)
+	mux.HandleFunc("/api/peers/connect", s.handleConnectPeer)
 	mux.HandleFunc("/api/export", s.handleExportRVX)
 	mux.HandleFunc("/api/inspect", s.handleInspectRVX)
 	mux.HandleFunc("/api/import/rvx", s.handleExecuteRVX)
@@ -260,6 +262,59 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleConnectPeer accepts a JSON body {"multiaddr": "/ip4/.../p2p/..."} and manually dials the remote node.
+func (s *Server) handleConnectPeer(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Multiaddr string `json:"multiaddr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	maddr, err := multiaddr.NewMultiaddr(req.Multiaddr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid multiaddr: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	pi, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid peer multiaddr formatting: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := s.host.Connect(ctx, *pi); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to connect: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Persist the manually added peer
+	now := time.Now().Unix()
+	s.store.InsertPeer(&store.Peer{
+		ID:         pi.ID.String(),
+		Multiaddr:  maddr.String(),
+		LastSeen:   now,
+		TrustLevel: 100, // Manually added peers are highly trusted
+	})
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "connected", "peer_id": pi.ID.String()})
 }
 
 func (s *Server) handleCatalogs(w http.ResponseWriter, r *http.Request) {
