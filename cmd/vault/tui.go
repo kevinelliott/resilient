@@ -121,26 +121,45 @@ func nextSSE(sub sseSub) tea.Cmd {
 
 // Styling tokens
 var (
-	paneStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("202")).
+	leftPaneStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("202")). // Amber
 			Padding(1)
 
+	rightPaneStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("42")). // Cyan
+			Padding(1)
+
+	activeTabStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("0")).
+			Background(lipgloss.Color("42")). // Cyan bg
+			Padding(0, 1).
+			Bold(true).
+			MarginRight(1)
+
+	inactiveTabStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")). // Dark gray
+			Padding(0, 1).
+			MarginRight(1)
+
 	headerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("42")). // Cyan
+			Foreground(lipgloss.Color("202")). // Amber
 			Bold(true).
 			MarginBottom(1)
 
 	selectedItemStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("202")). // Amber
+				Foreground(lipgloss.Color("42")). // Cyan select highlighting
+				Background(lipgloss.Color("236")).
 				Bold(true)
 
 	itemStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250"))
 
 	systemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	msgAuthorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	msgAuthorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true)
 	msgTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // Green
 )
 
 func LaunchTUI() {
@@ -478,14 +497,25 @@ func (m model) View() string {
 		}
 	}
 
-	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(expContent)
+	leftPane := leftPaneStyle.Width(paneWidth).Height(paneHeight).Render(expContent)
 
 	// --- Right Pane: Dynamic Content ---
 	var rightPaneContent string
+
+	tabs := []string{"[0] GLOBAL COMMS", "[1] MESH TOPOLOGY", "[2] SWARM CAS"}
+	var renderedTabs []string
+	for i, t := range tabs {
+		if m.tabIndex == i {
+			renderedTabs = append(renderedTabs, activeTabStyle.Render(t))
+		} else {
+			renderedTabs = append(renderedTabs, inactiveTabStyle.Render(t))
+		}
+	}
+	navBar := lipgloss.JoinHorizontal(lipgloss.Top, renderedTabs...) + "\n\n"
 	
 	switch m.tabIndex {
 	case 0:
-		chatContent := headerStyle.Render("Global Comms Frequency (Tab ->)") + "\n\n"
+		chatContent := navBar
 		if m.err != nil {
 			chatContent += lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("Mesh Error: %v", m.err)) + "\n\n"
 		}
@@ -510,7 +540,7 @@ func (m model) View() string {
 		}
 		rightPaneContent = chatContent
 	case 1:
-		meshContent := headerStyle.Render("Mesh Topology (Tab ->)") + "\n\n"
+		meshContent := navBar
 		meshContent += fmt.Sprintf(itemStyle.Render("Active Nodes: %d")+"\n\n", len(m.meshPeers))
 		for _, p := range m.meshPeers {
 			display := p.ID
@@ -529,15 +559,23 @@ func (m model) View() string {
 		}
 		rightPaneContent = meshContent
 	case 2:
-		swarmContent := headerStyle.Render("CAS Active Swarm (Tab ->)") + "\n\n"
+		swarmContent := navBar
 		for _, v := range m.downloads {
 			percent := 0.0
 			if v.TotalChunks > 0 {
 				percent = float64(v.DownloadedChunks) / float64(v.TotalChunks) * 100.0
 			}
+			
+			statusColor := systemStyle
+			if v.Status == "completed" {
+				statusColor = successStyle
+			} else if v.Status == "failed" {
+				statusColor = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+			}
+			
 			swarmContent += fmt.Sprintf("%s\n%s  %.1f%% (%d / %d chunks)\n\n", 
 				msgAuthorStyle.Render(v.FileName),
-				systemStyle.Render(fmt.Sprintf("[%s]", v.Status)),
+				statusColor.Render(fmt.Sprintf("[%s]", v.Status)),
 				percent, v.DownloadedChunks, v.TotalChunks,
 			)
 		}
@@ -547,7 +585,7 @@ func (m model) View() string {
 		rightPaneContent = swarmContent
 	}
 	
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)
+	rightPane := rightPaneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)
 
 	// Join panes
 	layout := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
