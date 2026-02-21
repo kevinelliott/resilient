@@ -1,0 +1,48 @@
+# Binaries
+bin/
+*.exe
+*.o
+*.so
+*.dylib
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Mac
+.DS_Store
+
+# Go
+vendor/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# SQLite / Vault Testing
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+vault*.db*
+vault_cas*/
+vault_*
+testcgo*
+
+# temp
+/tmp/
+cas/
+

@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        # Skip Windows ARM64 for now
+        exclude:
+          - goos: windows
+            goarch: arm64
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          
+      - name: Build Web UI
+        run: |
+          cd web
+          npm install
+          npm run build
+          
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
+      - name: Build Final Daemon & CLI
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p build
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          go build -ldflags="-s -w" -o build/vaultd-${{ matrix.goos }}-${{ matrix.goarch }}$EXT ./cmd/vaultd
+          go build -ldflags="-s -w" -o build/vault-${{ matrix.goos }}-${{ matrix.goarch }}$EXT ./cmd/vault
+
+      - name: Package Release Archive
+        run: |
+          mkdir -p release-pkg/web
+          # The binary expects to serve from ./web/dist relative to its execution path
+          cp -r web/dist release-pkg/web/
+          cp build/* release-pkg/
+          cp README.md release-pkg/ || true
+          cp LICENSE release-pkg/ || true
+          
+          cd release-pkg
+          tar -czvf ../resilient-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz *
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: resilient-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
