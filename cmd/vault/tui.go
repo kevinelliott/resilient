@@ -513,10 +513,16 @@ func (m model) View() string {
 		meshContent := headerStyle.Render("Mesh Topology (Tab ->)") + "\n\n"
 		meshContent += fmt.Sprintf(itemStyle.Render("Active Nodes: %d")+"\n\n", len(m.meshPeers))
 		for _, p := range m.meshPeers {
-			name := p.Name
-			if name == "" { name = "<Anonymous>" }
+			display := p.ID
+			if len(display) > 12 {
+				display = display[:6] + "..." + display[len(display)-4:]
+			}
+			if p.Name != "" {
+				display = fmt.Sprintf("%s (%s)", p.Name, display)
+			}
+			
 			meshContent += fmt.Sprintf("%s %s %s\n", 
-				msgAuthorStyle.Render(name),
+				msgAuthorStyle.Render(display),
 				systemStyle.Render(fmt.Sprintf("(%s, %s)", p.Status, p.Latency)),
 				systemStyle.Render(p.Route),
 			)
