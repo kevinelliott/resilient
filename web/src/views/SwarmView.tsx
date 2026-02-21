@@ -76,8 +76,49 @@ export function SwarmView() {
 
     useEffect(() => {
         fetchDownloads();
-        const interval = setInterval(fetchDownloads, 1000);
-        return () => clearInterval(interval);
+
+        const events = new EventSource('/api/events');
+
+        events.addEventListener('mesh_state', (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                if (Array.isArray(data)) {
+                    const db: Record<string, string> = {};
+                    data.forEach(p => {
+                        if (p.name) db[p.id] = p.name;
+                    });
+                    setPeerDb(db);
+                }
+            } catch (err) { }
+        });
+
+        events.addEventListener('cas_chunk_progress', (e) => {
+            try {
+                const dl = JSON.parse(e.data);
+                const fileId = dl.id || dl.file_id;
+                setDownloads(prev => {
+                    const existing = prev[fileId] || {
+                        file_id: fileId,
+                        file_name: dl.name || dl.file_name || 'Unknown',
+                        start_time: dl.start_time || Math.floor(Date.now() / 1000),
+                        peers: dl.peers || []
+                    };
+                    return {
+                        ...prev,
+                        [fileId]: {
+                            ...existing,
+                            total_chunks: dl.total_chunks !== undefined ? dl.total_chunks : existing.total_chunks,
+                            downloaded_chunks: dl.downloaded_chunks !== undefined ? dl.downloaded_chunks : existing.downloaded_chunks,
+                            status: dl.status || existing.status
+                        }
+                    };
+                });
+            } catch (err) { }
+        });
+
+        return () => {
+            events.close();
+        };
     }, []);
 
     const dlArray = Object.values(downloads).sort((a, b) => b.start_time - a.start_time);

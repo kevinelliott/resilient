@@ -208,7 +208,7 @@ func (s *Server) handleExecuteRVX(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				for _, nf := range newFiles {
-					go s.fetcher.FetchFileSwarm(r.Context(), pids, nf)
+					go s.fetcher.FetchFileSwarm(r.Context(), pids, nf, s.PublishEvent)
 				}
 			}
 		}

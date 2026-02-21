@@ -79,7 +79,14 @@ export function MeshView() {
                 .catch(err => console.error("Failed to fetch peers", err));
         };
         fetchPeers();
-        const interval = setInterval(fetchPeers, 2500);
+
+        const events = new EventSource('/api/events');
+        events.addEventListener('mesh_state', (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                setPeers(data || []);
+            } catch (err) { }
+        });
 
         fetch('/api/info')
             .then(res => res.json())
@@ -91,7 +98,9 @@ export function MeshView() {
             .then(data => setConfig(data))
             .catch(err => console.error("Failed to fetch config", err));
 
-        return () => clearInterval(interval);
+        return () => {
+            events.close();
+        };
     }, []);
 
     useEffect(() => {

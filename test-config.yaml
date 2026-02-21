@@ -1,0 +1,25 @@
+# Resilient Knowledge Vault Configuration
+# 
+# This file governs both the background 'vaultd' daemon and the 'vault' CLI client.
+# All options below are set to their defaults but are commented out.
+# Uncomment and change specific lines to override the built-in defaults.
+
+daemon:
+  # Path to the local SQLite database file. Uses WAL mode.
+  # db_path: "vault.db"
+
+  # Path to the immutable CAS (Content Addressable Storage) directory.
+  # cas_dir: "vault_cas"
+
+  # Port to expose the local HTTP API and Web UI (Localhost only natively).
+  # api_port: 8080
+
+  # Port to bind the Libp2p network mesh listener (TCP, UDP QUIC, UDP WebRTC).
+  # p2p_port: 4001
+
+  # Network profile strategy: 'standard', 'hub', or 'stealth'.
+  # profile: "standard"
+
+client:
+  # The endpoint URL that the CLI and TUI use to interact with the local daemon.
+  # api_url: "http://127.0.0.1:8080"

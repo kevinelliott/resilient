@@ -104,3 +104,8 @@ else
     echo "  For a native experience, download the .exe from your web portal."
 fi
 echo ""
+
+# CGO dependencies for SQLite compilation on Linux
+if command -v apt-get &> /dev/null; then
+    sudo apt-get update && sudo apt-get install -y gcc g++
+fi

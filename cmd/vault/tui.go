@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -35,6 +37,24 @@ type Message struct {
 	Time     int64  `json:"created_at"`
 }
 
+type Peer struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Latency string `json:"latency"`
+	Route   string `json:"route"`
+	Trust   string `json:"trust"`
+}
+
+type ActiveDownload struct {
+	FileID           string   `json:"file_id"`
+	FileName         string   `json:"file_name"`
+	TotalChunks      int      `json:"total_chunks"`
+	DownloadedChunks int      `json:"downloaded_chunks"`
+	Status           string   `json:"status"`
+	Peers            []string `json:"peers"`
+}
+
 type model struct {
 	width  int
 	height int
@@ -49,9 +69,54 @@ type model struct {
 	files       []FileItem
 	bundleChain []Bundle
 	activeCat   *Catalog
+	meshPeers   []Peer
+	downloads   map[string]ActiveDownload
+	sse         sseSub
 
 	// UI State
-	cursor int // index of the active list item
+	cursor   int // index of the active list item
+	tabIndex int // 0: Chat, 1: Mesh, 2: Swarm
+}
+
+type sseMsg struct {
+	Event string
+	Data  string
+}
+
+type sseSub struct {
+	scanner *bufio.Scanner
+}
+
+func startSSE() tea.Msg {
+	resp, err := http.Get(apiUrl + "/api/events")
+	if err != nil {
+		return err
+	}
+	return sseSub{scanner: bufio.NewScanner(resp.Body)}
+}
+
+func nextSSE(sub sseSub) tea.Cmd {
+	return func() tea.Msg {
+		var event, data string
+		for sub.scanner.Scan() {
+			line := sub.scanner.Text()
+			if line == "" {
+				if event != "" {
+					return sseMsg{Event: event, Data: data}
+				}
+				continue
+			}
+			if len(line) > 6 && line[:6] == "event:" {
+				event = strings.TrimSpace(line[6:])
+			} else if len(line) > 5 && line[:5] == "data:" {
+				data = strings.TrimSpace(line[5:])
+			}
+		}
+		if err := sub.scanner.Err(); err != nil {
+			return err
+		}
+		return nil // EOF
+	}
 }
 
 // Styling tokens
@@ -106,7 +171,7 @@ func tickCmd() tea.Cmd {
 }
 
 func fetchMessagesCmd() tea.Msg {
-	resp, err := http.Get(defaultAPIUrl + "/api/chat")
+	resp, err := http.Get(apiUrl + "/api/chat")
 	if err != nil {
 		return err
 	}
@@ -129,7 +194,7 @@ func fetchMessagesCmd() tea.Msg {
 type catalogsMsg []Catalog
 
 func fetchCatalogsCmd() tea.Msg {
-	resp, err := http.Get(defaultAPIUrl + "/api/catalogs")
+	resp, err := http.Get(apiUrl + "/api/catalogs")
 	if err != nil {
 		return err
 	}
@@ -147,9 +212,9 @@ type contentMsg struct {
 
 func fetchContentCmd(catalogID string, bundleID string) tea.Cmd {
 	return func() tea.Msg {
-		endpoint := fmt.Sprintf("%s/api/catalogs/%s", defaultAPIUrl, catalogID)
+		endpoint := fmt.Sprintf("%s/api/catalogs/%s", apiUrl, catalogID)
 		if bundleID != "" {
-			endpoint = fmt.Sprintf("%s/api/bundles/%s", defaultAPIUrl, bundleID)
+			endpoint = fmt.Sprintf("%s/api/bundles/%s", apiUrl, bundleID)
 		}
 
 		resp, err := http.Get(endpoint)
@@ -172,7 +237,7 @@ func importURLCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		payload := map[string]string{"url": url}
 		body, _ := json.Marshal(payload)
-		resp, err := http.Post(defaultAPIUrl+"/api/import/url", "application/json", bytes.NewBuffer(body))
+		resp, err := http.Post(apiUrl+"/api/import/url", "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			return fmt.Errorf("import error: %w", err)
 		}
@@ -186,9 +251,9 @@ func importURLCmd(url string) tea.Cmd {
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
-		tickCmd(),
 		func() tea.Msg { return fetchMessagesCmd() },
 		func() tea.Msg { return fetchCatalogsCmd() },
+		startSSE,
 	)
 }
 
@@ -203,6 +268,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up":
 			if m.cursor > 0 {
 				m.cursor--
+			}
+		case "left":
+			if m.tabIndex > 0 {
+				m.tabIndex--
+			} else {
+				m.tabIndex = 2
+			}
+		case "right", "tab":
+			if m.tabIndex < 2 {
+				m.tabIndex++
+			} else {
+				m.tabIndex = 0
 			}
 		case "down":
 			max := len(m.catalogs) - 1
@@ -228,7 +305,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, func() tea.Msg {
 						payload := map[string]string{"content": msgText, "ref_target_id": ""}
 						data, _ := json.Marshal(payload)
-						http.Post(defaultAPIUrl+"/api/chat", "application/json", bytes.NewBuffer(data))
+						http.Post(apiUrl+"/api/chat", "application/json", bytes.NewBuffer(data))
 						return fetchMessagesCmd()
 					})
 				}
@@ -288,6 +365,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = msg
 	case catalogsMsg:
 		m.catalogs = msg
+	case sseSub:
+		m.sse = msg
+		cmds = append(cmds, nextSSE(m.sse))
+	case sseMsg:
+		if msg.Event == "mesh_state" {
+			var peers []Peer
+			json.Unmarshal([]byte(msg.Data), &peers)
+			m.meshPeers = peers
+		} else if msg.Event == "cas_chunk_progress" {
+			var dl ActiveDownload
+			dlData := make(map[string]interface{})
+			json.Unmarshal([]byte(msg.Data), &dlData)
+			
+			// We have to parse generic payload from the struct
+			if idStr, ok := dlData["id"].(string); ok { dl.FileID = idStr }
+			if idStr, ok := dlData["file_id"].(string); ok && dl.FileID == "" { dl.FileID = idStr }
+			if name, ok := dlData["name"].(string); ok { dl.FileName = name }
+			if name, ok := dlData["file_name"].(string); ok && dl.FileName == "" { dl.FileName = name }
+			if tc, ok := dlData["total_chunks"].(float64); ok { dl.TotalChunks = int(tc) }
+			if dc, ok := dlData["downloaded_chunks"].(float64); ok { dl.DownloadedChunks = int(dc) }
+			if st, ok := dlData["status"].(string); ok { dl.Status = st }
+
+			if m.downloads == nil {
+				m.downloads = make(map[string]ActiveDownload)
+			}
+			
+			// retain missing properties from map
+			if exist, ok := m.downloads[dl.FileID]; ok {
+				if dl.TotalChunks == 0 { dl.TotalChunks = exist.TotalChunks }
+				if dl.FileName == "" { dl.FileName = exist.FileName }
+			}
+			m.downloads[dl.FileID] = dl
+		}
+		cmds = append(cmds, nextSSE(m.sse))
 	case contentMsg:
 		m.bundles = msg.Bundles
 		m.files = msg.Files
@@ -369,33 +480,68 @@ func (m model) View() string {
 
 	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(expContent)
 
-	// --- Right Pane: Chat / Details ---
-	chatContent := headerStyle.Render("Global Comms Frequency") + "\n\n"
-	if m.err != nil {
-		chatContent += lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("Mesh Error: %v", m.err)) + "\n\n"
+	// --- Right Pane: Dynamic Content ---
+	var rightPaneContent string
+	
+	switch m.tabIndex {
+	case 0:
+		chatContent := headerStyle.Render("Global Comms Frequency (Tab ->)") + "\n\n"
+		if m.err != nil {
+			chatContent += lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("Mesh Error: %v", m.err)) + "\n\n"
+		}
+		
+		visibleMsgs := m.messages
+		maxRows := paneHeight - 6
+		if len(visibleMsgs) > maxRows {
+			visibleMsgs = visibleMsgs[len(visibleMsgs)-maxRows:]
+		}
+	
+		for _, msg := range visibleMsgs {
+			t := time.Unix(msg.Time, 0).Format("15:04")
+			author := msg.AuthorID
+			if len(author) > 8 {
+				author = author[:8] + "..."
+			}
+			chatContent += fmt.Sprintf("[%s] %s %s\n",
+				systemStyle.Render(t),
+				msgAuthorStyle.Render(author+":"),
+				msgTextStyle.Render(msg.Content),
+			)
+		}
+		rightPaneContent = chatContent
+	case 1:
+		meshContent := headerStyle.Render("Mesh Topology (Tab ->)") + "\n\n"
+		meshContent += fmt.Sprintf(itemStyle.Render("Active Nodes: %d")+"\n\n", len(m.meshPeers))
+		for _, p := range m.meshPeers {
+			name := p.Name
+			if name == "" { name = "<Anonymous>" }
+			meshContent += fmt.Sprintf("%s %s %s\n", 
+				msgAuthorStyle.Render(name),
+				systemStyle.Render(fmt.Sprintf("(%s, %s)", p.Status, p.Latency)),
+				systemStyle.Render(p.Route),
+			)
+		}
+		rightPaneContent = meshContent
+	case 2:
+		swarmContent := headerStyle.Render("CAS Active Swarm (Tab ->)") + "\n\n"
+		for _, v := range m.downloads {
+			percent := 0.0
+			if v.TotalChunks > 0 {
+				percent = float64(v.DownloadedChunks) / float64(v.TotalChunks) * 100.0
+			}
+			swarmContent += fmt.Sprintf("%s\n%s  %.1f%% (%d / %d chunks)\n\n", 
+				msgAuthorStyle.Render(v.FileName),
+				systemStyle.Render(fmt.Sprintf("[%s]", v.Status)),
+				percent, v.DownloadedChunks, v.TotalChunks,
+			)
+		}
+		if len(m.downloads) == 0 {
+			swarmContent += systemStyle.Render("No active CAS chunk ingestions.")
+		}
+		rightPaneContent = swarmContent
 	}
 	
-	// Print messages from bottom up
-	visibleMsgs := m.messages
-	maxRows := paneHeight - 6
-	if len(visibleMsgs) > maxRows {
-		visibleMsgs = visibleMsgs[len(visibleMsgs)-maxRows:]
-	}
-
-	for _, msg := range visibleMsgs {
-		t := time.Unix(msg.Time, 0).Format("15:04")
-		author := msg.AuthorID
-		if len(author) > 8 {
-			author = author[:8] + "..."
-		}
-		chatContent += fmt.Sprintf("[%s] %s %s\n",
-			systemStyle.Render(t),
-			msgAuthorStyle.Render(author+":"),
-			msgTextStyle.Render(msg.Content),
-		)
-	}
-
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(chatContent)
+	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)
 
 	// Join panes
 	layout := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)

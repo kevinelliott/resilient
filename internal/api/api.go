@@ -31,8 +31,8 @@ type Publisher interface {
 }
 
 type Fetcher interface {
-	FetchFile(ctx context.Context, peerID peer.ID, file *store.File) error
-	FetchFileSwarm(ctx context.Context, peers []peer.ID, file *store.File) error
+	FetchFile(ctx context.Context, peerID peer.ID, file *store.File, publish func(string, interface{})) error
+	FetchFileSwarm(ctx context.Context, peers []peer.ID, file *store.File, publish func(string, interface{})) error
 	GetActiveDownloads() map[string]interface{}
 }
 
@@ -46,6 +46,7 @@ type Server struct {
 	cas              *cas.Store
 	publisher        Publisher
 	fetcher          Fetcher
+	eventBus         *EventBus
 
 	ingestMu         sync.RWMutex
 	activeIngestions map[string]map[string]interface{}
@@ -57,6 +58,7 @@ type progressReader struct {
 	ingest map[string]interface{}
 	mu     *sync.RWMutex
 	read   int64
+	s      *Server
 }
 
 func (pr *progressReader) Read(p []byte) (n int, err error) {
@@ -65,14 +67,26 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 		pr.read += int64(n)
 		pr.mu.Lock()
 		pr.ingest["downloaded_chunks"] = int(pr.read / int64(cas.ChunkSize))
+		// Create safe copy for broadcast
+		payload := make(map[string]interface{})
+		for k, v := range pr.ingest { payload[k] = v }
 		pr.mu.Unlock()
+		if pr.s != nil {
+			pr.s.PublishEvent("cas_chunk_progress", payload)
+		}
 	}
 	if err == io.EOF {
 		pr.mu.Lock()
 		if total, ok := pr.ingest["total_chunks"].(int); ok && total > 0 {
 			pr.ingest["downloaded_chunks"] = total
 		}
+		// Create safe copy for broadcast
+		payload := make(map[string]interface{})
+		for k, v := range pr.ingest { payload[k] = v }
 		pr.mu.Unlock()
+		if pr.s != nil {
+			pr.s.PublishEvent("cas_chunk_progress", payload)
+		}
 	}
 	return n, err
 }
@@ -89,12 +103,14 @@ func New(port int, host host.Host, startTime time.Time, store *store.Store, casS
 		cas:              casStore,
 		publisher:        pub,
 		fetcher:          fetcher,
+		eventBus:         NewEventBus(),
 		activeIngestions: make(map[string]map[string]interface{}),
 		triggerBootstrap: bootstrapCb,
 	}
 
 	// Basic endpoints
 	mux.HandleFunc("/api/info", s.handleInfo)
+	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/peers", s.handlePeers)
 	mux.HandleFunc("/api/peers/connect", s.handleConnectPeer)
 	mux.HandleFunc("/api/export", s.handleExportRVX)
@@ -124,6 +140,17 @@ func New(port int, host host.Host, startTime time.Time, store *store.Store, casS
 		Handler:mux,
 	}
 
+	// Telemetry Background Ticker
+	go func() {
+		ticker := time.NewTicker(2500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			payload := s.buildPeersPayload()
+			s.PublishEvent("mesh_state", payload)
+		}
+	}()
+
 	return s
 }
 
@@ -138,6 +165,12 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	log.Println("Stopping API server...")
 	return s.srv.Shutdown(ctx)
+}
+
+func (s *Server) PublishEvent(eventType string, payload interface{}) {
+	if s.eventBus != nil {
+		s.eventBus.Publish(eventType, payload)
+	}
 }
 
 func setCORS(w http.ResponseWriter) {
@@ -173,17 +206,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	setCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	
+func (s *Server) buildPeersPayload() []map[string]string {
 	peers, err := s.store.GetPeers()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return []map[string]string{}
 	}
 
 	conf, _ := s.store.GetConfig()
@@ -229,7 +255,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 					p.LastSeen = now
 					go s.store.InsertPeer(p) // bump LastSeen asynchronously
 
-					ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 					ch := ping.Ping(ctx, s.host, pid)
 					res := <-ch
 					cancel()
@@ -259,9 +285,19 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	if response == nil {
 		response = []map[string]string{}
 	}
+	return response
+}
 
+func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	
+	payload := s.buildPeersPayload()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(payload)
 }
 
 // handleConnectPeer accepts a JSON body {"multiaddr": "/ip4/.../p2p/..."} and manually dials the remote node.
@@ -601,6 +637,7 @@ func (s *Server) handleImportURL(w http.ResponseWriter, r *http.Request) {
 			r:      resp.Body,
 			ingest: ingest,
 			mu:     &s.ingestMu,
+			s:      s,
 		}
 
 		// Write to CAS
@@ -821,7 +858,7 @@ func (s *Server) handleFetchFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid peer ID: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		err = s.fetcher.FetchFile(r.Context(), pid, targetFile)
+		err = s.fetcher.FetchFile(r.Context(), pid, targetFile, s.PublishEvent)
 	} else {
 		// Swarm download from all known peers
 		dbPeers, _ := s.store.GetPeers()
@@ -833,7 +870,7 @@ func (s *Server) handleFetchFile(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		err = s.fetcher.FetchFileSwarm(r.Context(), pids, targetFile)
+		err = s.fetcher.FetchFileSwarm(r.Context(), pids, targetFile, s.PublishEvent)
 	}
 
 	if err != nil {

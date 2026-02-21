@@ -20,14 +20,14 @@ import (
 const discoveryNamespace = "resilient-mesh-v1"
 
 // setupDiscovery configures mDNS discovery for local networks
-func setupDiscovery(h host.Host, s *store.Store) error {
-	notifee := &discoveryNotifee{h: h, s: s}
+func setupDiscovery(h host.Host, s *store.Store, publish func(string, interface{})) error {
+	notifee := &discoveryNotifee{h: h, s: s, publish: publish}
 	svc := mdns.NewMdnsService(h, discoveryNamespace, notifee)
 	return svc.Start()
 }
 
 // setupDHTDiscovery configures Kademlia DHT for wide network finding
-func setupDHTDiscovery(ctx context.Context, h host.Host, kDHT *dht.IpfsDHT, s *store.Store) error {
+func setupDHTDiscovery(ctx context.Context, h host.Host, kDHT *dht.IpfsDHT, s *store.Store, publish func(string, interface{})) error {
 	rd := routing.NewRoutingDiscovery(kDHT)
 	
 	// Expose ourself
@@ -60,12 +60,16 @@ func setupDHTDiscovery(ctx context.Context, h host.Host, kDHT *dht.IpfsDHT, s *s
 					if len(p.Addrs) > 0 {
 						multiaddr = p.Addrs[0].String()
 					}
-					s.InsertPeer(&store.Peer{
+					peerObj := &store.Peer{
 						ID:         p.ID.String(),
 						Multiaddr:  multiaddr,
 						LastSeen:   time.Now().Unix(),
 						TrustLevel: 0,
-					})
+					}
+					s.InsertPeer(peerObj)
+					if publish != nil {
+						publish("peer_connected", peerObj)
+					}
 				}
 			}
 			<-ticker.C
@@ -76,8 +80,9 @@ func setupDHTDiscovery(ctx context.Context, h host.Host, kDHT *dht.IpfsDHT, s *s
 }
 
 type discoveryNotifee struct {
-	h host.Host
-	s *store.Store
+	h       host.Host
+	s       *store.Store
+	publish func(string, interface{})
 }
 
 // HandlePeerFound connects to peers discovered via mDNS
@@ -99,14 +104,17 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 			multiaddrs = pi.Addrs[0].String() // keep simple for now
 		}
 		
-		err := n.s.InsertPeer(&store.Peer{
+		peerObj := &store.Peer{
 			ID:         pi.ID.String(),
 			Multiaddr:  multiaddrs,
 			LastSeen:   time.Now().Unix(),
 			TrustLevel: 0,
-		})
+		}
+		err := n.s.InsertPeer(peerObj)
 		if err != nil {
 			log.Printf("Failed to insert peer into db: %v", err)
+		} else if n.publish != nil {
+			n.publish("peer_connected", peerObj)
 		}
 	}
 }

@@ -7,17 +7,36 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"flag"
+
+	"resilient/internal/config"
 )
 
-const defaultAPIUrl = "http://127.0.0.1:8080"
+var apiUrl string
 
 func main() {
-	if len(os.Args) < 2 {
+	configPath := flag.String("config", "", "Path to a YAML configuration file")
+	apiOverride := flag.String("api-url", "", "Override the Daemon API URL")
+	flag.Parse()
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Printf("Configuration error: %v\n", err)
+		os.Exit(1)
+	}
+
+	apiUrl = cfg.Client.APIUrl
+	if *apiOverride != "" {
+		apiUrl = *apiOverride
+	}
+
+	args := flag.Args()
+	if len(args) < 1 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	command := os.Args[1]
+	command := args[0]
 
 	switch command {
 	case "status":
@@ -25,7 +44,17 @@ func main() {
 	case "catalogs":
 		handleCatalogs()
 	case "chat":
-		handleChat(os.Args[2:])
+		handleChat(args[1:])
+	case "peers":
+		handlePeers()
+	case "inspect":
+		handleInspect(args[1:])
+	case "import":
+		handleImport(args[1:])
+	case "bootstrap":
+		handleBootstrap()
+	case "config":
+		handleConfig()
 	case "tui":
 		LaunchTUI()
 	default:
@@ -38,16 +67,24 @@ func main() {
 func printUsage() {
 	fmt.Println("Resilient Knowledge Vault CLI")
 	fmt.Println("\nUsage:")
-	fmt.Println("  vault <command> [arguments]")
+	fmt.Println("  vault [flags] <command> [arguments]")
+	fmt.Println("\nFlags:")
+	fmt.Println("  -config string    Path to configuration file")
+	fmt.Println("  -api-url string   Override configuration API endpoint (default: http://127.0.0.1:8080)")
 	fmt.Println("\nCommands:")
-	fmt.Println("  status      Check the status of the local daemon")
-	fmt.Println("  catalogs    List all available catalogs")
-	fmt.Println("  chat <msg>  Transmit a message to the mesh")
-	fmt.Println("  tui         Launch the interactive TUI mode")
+	fmt.Println("  status            Check the status of the local daemon")
+	fmt.Println("  catalogs          List all available catalogs")
+	fmt.Println("  peers             List connected mesh peers")
+	fmt.Println("  config            View the current node configuration")
+	fmt.Println("  bootstrap         Trigger a fresh DHT network bootstrap")
+	fmt.Println("  inspect <url>     Inspect a remote RVX payload")
+	fmt.Println("  import <url>      Import an RVX payload via the mesh")
+	fmt.Println("  chat <msg>        Transmit a message to the mesh")
+	fmt.Println("  tui               Launch the interactive TUI mode")
 }
 
 func handleStatus() {
-	resp, err := http.Get(defaultAPIUrl + "/api/info")
+	resp, err := http.Get(apiUrl + "/api/info")
 	if err != nil {
 		fmt.Printf("Error contacting daemon: %v\n", err)
 		return
@@ -69,7 +106,7 @@ func handleStatus() {
 }
 
 func handleCatalogs() {
-	resp, err := http.Get(defaultAPIUrl + "/api/catalogs")
+	resp, err := http.Get(apiUrl + "/api/catalogs")
 	if err != nil {
 		fmt.Printf("Error contacting daemon: %v\n", err)
 		return
@@ -102,13 +139,8 @@ func handleChat(args []string) {
 		msg += " " + args[i]
 	}
 
-	payload := map[string]string{
-		"content":       msg,
-		"ref_target_id": "",
-	}
-	data, _ := json.Marshal(payload)
-
-	resp, err := http.Post(defaultAPIUrl+"/api/chat", "application/json", bytes.NewBuffer(data))
+	payloadBytes, _ := json.Marshal(map[string]string{"message": msg})
+	resp, err := http.Post(apiUrl+"/api/chat", "application/json", bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		fmt.Printf("Error contacting daemon: %v\n", err)
 		return
@@ -120,4 +152,81 @@ func handleChat(args []string) {
 	} else {
 		fmt.Printf("Failed to transmit. Status: %s\n", resp.Status)
 	}
+}
+
+func handlePeers() {
+	resp, err := http.Get(apiUrl + "/api/peers")
+	if err != nil {
+		fmt.Printf("Error contacting daemon: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var peers []map[string]interface{}
+	json.Unmarshal(body, &peers)
+
+	fmt.Printf("Connected Mesh Peers:\n")
+	fmt.Printf("---------------------\n")
+	for _, p := range peers {
+		name := ""
+		if n, ok := p["name"].(string); ok && n != "" {
+			name = n + " "
+		}
+		fmt.Printf("- %s(ID: %s) [%s]\n", name, p["id"], p["status"])
+	}
+}
+
+func handleConfig() {
+	resp, err := http.Get(apiUrl + "/api/config")
+	if err != nil {
+		fmt.Printf("Error contacting daemon: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("Daemon Configuration:\n%s\n", string(body))
+}
+
+func handleBootstrap() {
+	resp, err := http.Post(apiUrl+"/api/bootstrap", "application/json", nil)
+	if err != nil {
+		fmt.Printf("Error contacting daemon: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	fmt.Println("Triggered DHT Bootstrap cycle.")
+}
+
+func handleInspect(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: vault inspect <url>")
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"url": args[0]})
+	resp, err := http.Post(apiUrl+"/api/inspect", "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		fmt.Printf("Error contacting daemon: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("%s\n", string(body))
+}
+
+func handleImport(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: vault import <url>")
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"url": args[0]})
+	resp, err := http.Post(apiUrl+"/api/import/rvx", "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		fmt.Printf("Error contacting daemon: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("%s\n", string(body))
 }

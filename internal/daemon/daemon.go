@@ -188,7 +188,7 @@ func (d *Daemon) Start() error {
 		log.Printf("Failed to bootstrap DHT: %v", err)
 	} else {
 		// Only start DHT discovery if bootstrap succeeds or we don't care about failure
-		if err := setupDHTDiscovery(d.ctx, d.host, d.dht, d.store); err != nil {
+		if err := setupDHTDiscovery(d.ctx, d.host, d.dht, d.store, d.api.PublishEvent); err != nil {
 			log.Printf("Failed to setup DHT discovery: %v", err)
 		} else {
 			log.Println("DHT discovery started.")
@@ -197,7 +197,7 @@ func (d *Daemon) Start() error {
 
 	// Start Discovery (mDNS)
 	if d.cfg.Profile != "stealth" {
-		if err := setupDiscovery(d.host, d.store); err != nil {
+		if err := setupDiscovery(d.host, d.store, d.api.PublishEvent); err != nil {
 			log.Printf("Failed to setup mDNS discovery: %v", err)
 		} else {
 			log.Println("mDNS discovery started.")

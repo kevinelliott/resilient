@@ -123,7 +123,7 @@ func (mgr *CASSyncManager) FetchChunk(ctx context.Context, peerID peer.ID, hash 
 }
 
 // FetchFile attempts to download an entire file sequentially from a given peer
-func (mgr *CASSyncManager) FetchFile(ctx context.Context, peerID peer.ID, file *store.File) error {
+func (mgr *CASSyncManager) FetchFile(ctx context.Context, peerID peer.ID, file *store.File, publish func(string, interface{})) error {
 	var chunkHashes []string
 	if err := json.Unmarshal([]byte(file.ChunkHashes), &chunkHashes); err != nil {
 		return fmt.Errorf("invalid chunk hashes JSON: %w", err)
@@ -160,7 +160,7 @@ func (mgr *CASSyncManager) FetchFile(ctx context.Context, peerID peer.ID, file *
 }
 
 // FetchFileSwarm attempts to download an entire file's chunks in parallel from a list of peers
-func (mgr *CASSyncManager) FetchFileSwarm(ctx context.Context, peers []peer.ID, file *store.File) error {
+func (mgr *CASSyncManager) FetchFileSwarm(ctx context.Context, peers []peer.ID, file *store.File, publish func(string, interface{})) error {
 	var chunkHashes []string
 	if err := json.Unmarshal([]byte(file.ChunkHashes), &chunkHashes); err != nil {
 		return fmt.Errorf("invalid chunk hashes JSON: %w", err)
@@ -196,8 +196,6 @@ func (mgr *CASSyncManager) FetchFileSwarm(ctx context.Context, peers []peer.ID, 
 		if activeDL.Status == "downloading" {
 			activeDL.Status = "completed"
 		}
-		// In a real app we might clean up completed downloads after some time,
-		// but for the UI we can let them stick around so the user sees "completed".
 		mgr.mu.Unlock()
 	}()
 
@@ -271,7 +269,19 @@ func (mgr *CASSyncManager) FetchFileSwarm(ctx context.Context, peers []peer.ID, 
 		successCount++
 		mgr.mu.Lock()
 		activeDL.DownloadedChunks = successCount
+		
+		publishMap := map[string]interface{}{
+			"id": activeDL.FileID,
+			"name": activeDL.FileName,
+			"downloaded_chunks": activeDL.DownloadedChunks,
+			"total_chunks": activeDL.TotalChunks,
+			"status": activeDL.Status,
+		}
 		mgr.mu.Unlock()
+		
+		if publish != nil {
+			publish("cas_chunk_progress", publishMap)
+		}
 	}
 
 	log.Printf("Successfully swarm downloaded %d chunks for file %s", successCount, file.ID)

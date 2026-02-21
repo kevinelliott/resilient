@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"resilient/internal/api"
+	"resilient/internal/config"
 	"resilient/internal/daemon"
 )
 
@@ -39,16 +40,51 @@ func main() {
 			}
 			runImportClient(importCmd.Arg(0), *strategy)
 			return
+		case "generate-config":
+			generateCmd := flag.NewFlagSet("generate-config", flag.ExitOnError)
+			outPath := generateCmd.String("out", "config.yaml", "Output path for the generated configuration file")
+			generateCmd.Parse(os.Args[2:])
+
+			if err := config.GenerateTemplate(*outPath); err != nil {
+				fmt.Printf("Failed to generate config: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Successfully generated annotated configuration at: %s\n", *outPath)
+			return
 		}
 	}
 
 	// Default: Start Daemon
-	dbPath := flag.String("db", "vault.db", "Path to the local SQLite database")
-	casDir := flag.String("cas-dir", "vault_cas", "Path to the CAS storage directory")
-	apiPort := flag.Int("api-port", 8080, "Port for the local HTTP API")
-	p2pPort := flag.Int("p2p-port", 4001, "Port for libp2p networking")
-	profile := flag.String("profile", "standard", "Node profile: standard, hub, or stealth")
+	configPath := flag.String("config", "", "Path to a YAML configuration file")
+	dbPath := flag.String("db", "", "Path to the local SQLite database")
+	casDir := flag.String("cas-dir", "", "Path to the CAS storage directory")
+	apiPort := flag.Int("api-port", 0, "Port for the local HTTP API")
+	p2pPort := flag.Int("p2p-port", 0, "Port for libp2p networking")
+	profile := flag.String("profile", "", "Node profile: standard, hub, or stealth")
 	flag.Parse()
+
+	// Load Configuration
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("Configuration error: %v", err)
+	}
+
+	// Override config with any explicitly provided CLI flags
+	if *dbPath != "" {
+		cfg.Daemon.DBPath = *dbPath
+	}
+	if *casDir != "" {
+		cfg.Daemon.CASDir = *casDir
+	}
+	if *apiPort != 0 {
+		cfg.Daemon.APIPort = *apiPort
+	}
+	if *p2pPort != 0 {
+		cfg.Daemon.P2PPort = *p2pPort
+	}
+	if *profile != "" {
+		cfg.Daemon.Profile = *profile
+	}
 
 	log.Println("Starting vaultd...")
 
@@ -57,11 +93,11 @@ func main() {
 
 	// Initialize the daemon
 	d, err := daemon.New(ctx, &daemon.Config{
-		DBPath:  *dbPath,
-		CASDir:  *casDir,
-		APIPort: *apiPort,
-		P2PPort: *p2pPort,
-		Profile: *profile,
+		DBPath:  cfg.Daemon.DBPath,
+		CASDir:  cfg.Daemon.CASDir,
+		APIPort: cfg.Daemon.APIPort,
+		P2PPort: cfg.Daemon.P2PPort,
+		Profile: cfg.Daemon.Profile,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize daemon: %v", err)
