@@ -44,5 +44,5 @@ testcgo*
 
 # temp
 /tmp/
-cas/
+/cas/
 
